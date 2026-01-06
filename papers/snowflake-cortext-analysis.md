@@ -4,43 +4,43 @@
 
 ---
 
-Cortex Agents are Snowflake's configurable AI agents that orchestrate between structured and unstructured data sources. They're powerful, but they're not always the right tool. After building a natural language querying system for credit portfolio analytics, I've learned when Agents add value and when simpler approaches work better.
+In early 2025, while building a custom MCP server for multi-database natural language queries, an invitation to Snowflake's World Tour provided an opportunity to explore their semantic view architecture in a hands-on lab. Within weeks, discussions began at work about integrating [Cortex Agents](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-agents) into an ELT pipeline for client-facing analytics. Cortex Agents enable sophisticated orchestration across structured databases and unstructured document sources—a capability that would require significant custom development otherwise. The technical analysis that followed revealed important architectural constraints and cost trade-offs that aren't immediately obvious from Snowflake's documentation.
 
-This guide covers the architecture decisions, cost trade-offs, and implementation patterns that emerged from that work.
+This guide covers those findings: when Agents add value versus when simpler approaches work better, the critical read-only limitation that shapes architecture decisions, and implementation patterns for financial data systems.
 
 ## What Cortex Agents Actually Do
 
-Cortex Agents utilize Cortex Analyst and Cortex Search as tools to plan tasks and generate responses. Cortex Analyst handles text-to-SQL for structured data (relational databases, your Snowflake environment). Cortex Search handles semi-structured and unstructured data—PDFs, markdown files, contracts stored in Stages.
+Cortex Agents utilize [Cortex Analyst](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-analyst) and [Cortex Search](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-search/cortex-search-overview) as tools to plan tasks and generate responses. Cortex Analyst handles text-to-SQL for structured data (relational databases, your Snowflake environment). Cortex Search handles semi-structured and unstructured dataâ€”PDFs, markdown files, contracts stored in Stages.
 
-When a user asks a question, the Agent parses the request and decides which tools to invoke. This orchestration is where the intelligence lives—and where the costs accumulate. The entire orchestration layer is charged based on tokens used.
+When a user asks a question, the Agent parses the request and decides which tools to invoke. This orchestration is where the intelligence livesâ€”and where the costs accumulate. The entire orchestration layer is charged based on tokens used.
 
-The backbone of this system is Semantic Views and Models. Semantic Views translate how business users describe data into executable queries. They define business logic, relationships, filters, and metrics specific to your domain.
+The backbone of this system is [Semantic Views and Models](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-analyst#semantic-model). Semantic Views translate how business users describe data into executable queries. They define business logic, relationships, filters, and metrics specific to your domain.
 
 ### Key Terminology
 
 | Term | What It Is | When to Use |
 |------|------------|-------------|
-| **Cortex Agents** | Orchestration layer that plans tasks, selects tools, and generates responses. Charged per token for orchestration. | Complex multi-tool queries; questions spanning structured AND unstructured data |
-| **Cortex Analyst** | Text-to-SQL tool used BY Agents to query structured data. Requires semantic models/views. Charged per token. | Structured data queries (holdings, financials, compliance) |
-| **Cortex LLM Functions** | Direct LLM calls without Agent orchestration. Simpler, cheaper. No planning or tool selection—just prompt in, response out. | Expression/formula generation; JSON structure generation; simple transformations |
-| **Semantic Views/Models** | YAML-based definitions that translate business language to database schema. Contains expressions, filters, metrics, and verified queries. | Defining business logic for Cortex Analyst |
+| **[Cortex Agents](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-agents)** | Orchestration layer that plans tasks, selects tools, and generates responses. Charged per token for orchestration. | Complex multi-tool queries; questions spanning structured AND unstructured data |
+| **[Cortex Analyst](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-analyst)** | Text-to-SQL tool used BY Agents to query structured data. Requires semantic models/views. Charged per token. | Structured data queries (holdings, financials, compliance) |
+| **[Cortex LLM Functions](https://docs.snowflake.com/en/user-guide/snowflake-cortex/aisql)** | Direct LLM calls without Agent orchestration. Simpler, cheaper. No planning or tool selectionâ€”just prompt in, response out. | Expression/formula generation; JSON structure generation; simple transformations |
+| **[Semantic Views/Models](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-analyst#semantic-model)** | YAML-based definitions that translate business language to database schema. Contains expressions, filters, metrics, and verified queries. | Defining business logic for Cortex Analyst |
 | **UDFs** | Snowflake schema objects created via DDL. Must be pre-built; Agents cannot create them. | Reusable, complex calculations registered as Agent tools |
 
-> **Key Insight:** For expression generation (creating calculated columns via natural language), use Cortex LLM Functions directly—not full Cortex Agents. Agents add orchestration overhead and cost that isn't needed for simple "generate JSON from this prompt" tasks. Reserve Agents for complex, multi-tool queries against structured and unstructured data.
+> **Key Insight:** For expression generation (creating calculated columns via natural language), use Cortex LLM Functions directlyâ€”not full Cortex Agents. Agents add orchestration overhead and cost that isn't needed for simple "generate JSON from this prompt" tasks. Reserve Agents for complex, multi-tool queries against structured and unstructured data.
 
 ### What Can Users Actually Ask?
 
 Here are concrete examples of what end users can ask and what happens behind the scenes:
 
-- **"What are my current holdings by issuer?"** → The Agent routes this to Cortex Analyst, which generates SQL against the semantic view, applies SCD Type 2 filters automatically, and returns aggregated results.
+- **"What are my current holdings by issuer?"** â†’ The Agent routes this to Cortex Analyst, which generates SQL against the semantic view, applies SCD Type 2 filters automatically, and returns aggregated results.
 
-- **"Summarize the covenant terms in the Acme credit agreement"** → The Agent routes this to Cortex Search, which locates the PDF in the Stage, extracts the relevant sections, and returns a summary.
+- **"Summarize the covenant terms in the Acme credit agreement"** â†’ The Agent routes this to Cortex Search, which locates the PDF in the Stage, extracts the relevant sections, and returns a summary.
 
-- **"Compare our exposure to private companies against what their contracts allow"** → The Agent uses *both* tools—Analyst queries the holdings data, Search retrieves contract documents, and the Agent synthesizes the results.
+- **"Compare our exposure to private companies against what their contracts allow"** â†’ The Agent uses *both* toolsâ€”Analyst queries the holdings data, Search retrieves contract documents, and the Agent synthesizes the results.
 
-- **"Create a field that calculates debt-to-EBITDA ratio"** → This bypasses the Agent entirely. A direct LLM Function call returns JSON, your application layer validates the expression, and persists it to the metadata store.
+- **"Create a field that calculates debt-to-EBITDA ratio"** â†’ This bypasses the Agent entirely. A direct LLM Function call returns JSON, your application layer validates the expression, and persists it to the metadata store.
 
-The first three require Agent orchestration. The fourth doesn't—and that distinction is where cost savings live.
+The first three require Agent orchestration. The fourth doesn'tâ€”and that distinction is where cost savings live.
 
 ## The Critical Limitation: Agents Cannot Create Objects
 
@@ -48,12 +48,12 @@ Agents are read-only. They cannot execute DDL. They cannot create views, UDFs, o
 
 **What do we mean by "objects"?** In Snowflake (and databases generally), *objects* are schema-level entities created via Data Definition Language (DDL) statements. This includes:
 
-- **VIEWs** — saved queries that act as virtual tables
-- **TABLEs** — physical data storage
-- **UDFs (User-Defined Functions)** — custom functions you create with `CREATE FUNCTION`
-- **Stored Procedures** — executable code blocks
-- **Stages** — locations for loading/unloading data
-- **Streams, Tasks, Sequences** — other first-class Snowflake objects
+- **VIEWs** â€” saved queries that act as virtual tables
+- **TABLEs** â€” physical data storage
+- **UDFs (User-Defined Functions)** â€” custom functions you create with `CREATE FUNCTION`
+- **Stored Procedures** â€” executable code blocks
+- **Stages** â€” locations for loading/unloading data
+- **Streams, Tasks, Sequences** â€” other first-class Snowflake objects
 
 Agents can *query* these objects, but they cannot *create, alter, or drop* them. Any `CREATE`, `ALTER`, or `DROP` statement is off-limits.
 
@@ -89,9 +89,9 @@ This is the most important architectural decision. Getting it wrong means either
 - Generating expressions or formulas from natural language
 - Creating JSON structures
 - Simple transformations or translations
-- Any task where you just need "prompt in → structured response out"
+- Any task where you just need "prompt in â†’ structured response out"
 
-### Example: Expression Generation with SNOWFLAKE.CORTEX.COMPLETE
+### Example: Expression Generation with [SNOWFLAKE.CORTEX.COMPLETE](https://docs.snowflake.com/en/user-guide/snowflake-cortex/aisql#complete)
 
 For an expression builder feature, the task is straightforward: take a user's natural language request and return a JSON structure. No orchestration, no tool selection, no multi-step planning needed.
 
@@ -135,13 +135,13 @@ This single LLM call costs a fraction of what Agent orchestration would cost for
 
 Semantic Views address the mismatch between how business users describe data and how it's stored in database schemas. They're generally categorized by potential questions a user would ask.
 
-For example, a holdings classification semantic view would include the tables, relationships, filters, and metrics required to answer questions about holdings classifications—DimHoldings, DimIssuer, the join logic. In order to provide consistent answers, the semantic models have access to libraries of reusable expressions, filters, and for complex questions, verified queries.
+For example, a holdings classification semantic view would include the tables, relationships, filters, and metrics required to answer questions about holdings classificationsâ€”DimHoldings, DimIssuer, the join logic. In order to provide consistent answers, the semantic models have access to libraries of reusable expressions, filters, and for complex questions, verified queries.
 
-Verified queries are exactly what they sound like—predefined, pre-written queries that an Agent knows are correct when a question is parsed correctly.
+Verified queries are exactly what they sound likeâ€”predefined, pre-written queries that an Agent knows are correct when a question is parsed correctly.
 
 ### Creating Semantic Views
 
-Semantic views can be created directly in Snowflake, or deployed from YAML to a Stage. The YAML approach makes them reusable beyond Snowflake.
+Semantic views can be created directly in Snowflake, or [deployed from YAML](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-analyst#creating-a-semantic-model-from-a-yaml-file) to a Stage. The YAML approach makes them reusable beyond Snowflake.
 
 ```sql
 CALL SYSTEM$CREATE_SEMANTIC_VIEW_FROM_YAML(
@@ -204,7 +204,7 @@ custom_instructions: |
 
 ## End-to-End Architecture: Persisting User-Created Fields
 
-The practical path to allowing users to create calculated columns through natural language requires an application layer that handles persistence. Cortex generates JSON—it cannot persist anything itself.
+The practical path to allowing users to create calculated columns through natural language requires an application layer that handles persistence. Cortex generates JSONâ€”it cannot persist anything itself.
 
 ### The Flow
 
@@ -290,7 +290,7 @@ The key insight is that Agents are read-only orchestrators, not builders. Any pe
 
 ## Appendix: Example Semantic View for Credit Holdings
 
-Below is a condensed semantic view for credit portfolio analytics, demonstrating SCD Type 2 handling, verified queries, and custom instructions. The full version—including Credit and ExchangeRate dimension tables and additional verified queries—is available in the [GitHub repository](https://github.com/yourusername/cortex-agents-reference).
+Below is a condensed semantic view for credit portfolio analytics, demonstrating SCD Type 2 handling, verified queries, and custom instructions. The full versionâ€”including Credit and Portfolio dimension tables and additional verified queriesâ€”is available in the [GitHub repository](https://github.com/yourusername/cortex-agents-reference).
 
 ```yaml
 name: credit_holdings_analytics
@@ -401,4 +401,4 @@ custom_instructions: |
 
 ---
 
-*For the complete semantic view with all dimension tables (Credit, ExchangeRate), additional verified queries, and implementation notes, see the companion GitHub repository.*
+*For the complete semantic view with all dimension tables (Credit, Portfolio), additional verified queries, and implementation notes, see the companion GitHub repository.*
