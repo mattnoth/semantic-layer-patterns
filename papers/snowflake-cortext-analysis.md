@@ -401,4 +401,4 @@ custom_instructions: |
 
 ---
 
-*For the complete semantic view with additional dimension tables (Credit, ExchangeRate), additional verified queries, and implementation notes, see the companion GitHub repository.*
+*For the complete semantic view with all dimension tables (Credit, ExchangeRate), additional verified queries, and implementation notes, see the companion GitHub repository.*
